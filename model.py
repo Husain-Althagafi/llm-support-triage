@@ -14,7 +14,7 @@ def get_model(model_name, load_in_4bit=True):
 
     return model, tokenizer
 
-def get_lora_config(r, alpha):
+def get_lora_config(r=8, alpha=16):
     lora_config = LoraConfig(
         r=r,
         lora_alpha=alpha,
