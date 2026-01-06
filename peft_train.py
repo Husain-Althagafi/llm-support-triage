@@ -5,40 +5,12 @@ from datasets import Dataset, load_from_disk
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-import torch.optim as optim
 from model import get_model, get_lora_config, get_lora_model
 import json
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
+import torch.optim.AdamW as AdamW
 
-SYSTEM_MSG = (
-    f'You are a support triage assistant\n'
-    f'Return STRICT JSON with keys: category, priority, first_response_steps (array of strings).'
-)
-
-def build_prompt(ticket: str) -> str:
-    return (
-        f'{SYSTEM_MSG}\n'
-        f'Ticket: {ticket}\n'
-        f'JSON:'
-    )
-
-def extract_ticket_from_processed_text(full_text: str) -> str:
-    # format is prompt + \n + json
-    for line in full_text.splitlines():
-        if line.startswith('Ticket: '):
-            return line[len('Ticket: '):]  
-    return full_text
-
-def try_parse_json(response_text: str) -> Optional[Dict[str, Any]]:
-    try:
-        start_idx = response_text.index('{')
-        end_idx = response_text.rindex('}') + 1
-        json_str = response_text[start_idx:end_idx]
-        parsed_json = json.loads(json_str)
-        return parsed_json
-    except (ValueError, json.JSONDecodeError):
-        return None
 
 def tokenize_masked(sample: Dict, tokenizer: AutoTokenizer, max_length: int = 512) -> Dict:
     text = sample['text']
@@ -67,7 +39,7 @@ def tokenize_masked(sample: Dict, tokenizer: AutoTokenizer, max_length: int = 51
             prompt_ids = prompt_ids[overflow:]
             input_ids = prompt_ids + response_ids
 
-    labels = len(prompt_ids) * [-100] + len(response_ids) * [1]
+    labels = len(prompt_ids) * [-100] + response_ids
     mask = [1] * len(input_ids)
 
     return {
@@ -76,16 +48,28 @@ def tokenize_masked(sample: Dict, tokenizer: AutoTokenizer, max_length: int = 51
         'attention_mask': mask,
     }
 
-def make_collate(tokenizer):
+def make_collate_fn(tokenizer):
+    pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+
+    def pad(sequences: List[List[int]], pad_value: int) -> torch.Tensor:
+        max_len = max(len(seq) for seq in sequences)
+        return torch.tensor(
+            [seq + [pad_value] * (max_len - len(seq)) for seq in sequences],
+            dtype=torch.long
+        )
+
     def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         input_ids = [item['input_ids'] for item in batch]
         labels = [item['labels'] for item in batch]
         attention_mask = [item['attention_mask'] for item in batch]
 
-        max_len = max(len(ids) for ids in input_ids)   
-
-
-
+        return {
+            'input_ids': pad(input_ids, pad_id),
+            'labels': pad(labels, -100),
+            'attention_mask': pad(attention_mask, 0),
+        }
+    
+    return collate_fn
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -107,6 +91,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if not torch.cuda.is_available():
+        raise RuntimeError(f'CUDA not available.')
+
     # load model and tokenizer
     print(f'Loading model and tokenizer for {args.model_name}...')
     model, tokenizer = get_model(args.model_name)
@@ -121,8 +108,16 @@ if __name__ == "__main__":
     # load datasets
     print(f'Loading datasets...')
     train_ds = load_from_disk('data/banking77/processed_v1/train')
-    eval_ds = load_from_disk('data/banking77/processed_v1/test')
+    test_ds = load_from_disk('data/banking77/processed_v1/test')
     print(f'Datasets loaded.')
+
+    train_tok = train_ds.map(lambda x: tokenize_masked(x, tokenizer), remove_columns=train_ds.column_names)
+    test_tok = test_ds.map(lambda x: tokenize_masked(x), tokenizer, remove_columns=test_ds.column_names)
+
+    train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, collate_fn=make_collate_fn(tokenizer))
+    test_loader = DataLoader(test_ds, batch_size=4, shuffle=True, collate_fn=make_collate_fn(tokenizer))
+
+    
 
     
 
