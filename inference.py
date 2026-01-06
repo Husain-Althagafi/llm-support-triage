@@ -93,6 +93,7 @@ if __name__ == '__main__':
         remove_columns = test_ds.column_names
     )
 
+    # TODO make better inferencing and evaluation (eval script or code can be in eval.py) also should save results
     total = 0
     valid = 0
     batch_size = 8
