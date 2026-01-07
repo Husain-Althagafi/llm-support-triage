@@ -10,6 +10,7 @@ import json
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
 from torch.optim import AdamW
+from torch.amp import GradScaler, autocast
 
 
 def tokenize_masked(sample: Dict, tokenizer: AutoTokenizer, max_length: int = 512) -> Dict:
@@ -39,7 +40,7 @@ def tokenize_masked(sample: Dict, tokenizer: AutoTokenizer, max_length: int = 51
             prompt_ids = prompt_ids[overflow:]
             input_ids = prompt_ids + response_ids
 
-    labels = len(prompt_ids) * [-100] + response_ids
+    labels = [-100] * len(prompt_ids)  + input_ids[len(prompt_ids):]
     mask = [1] * len(input_ids)
 
     return {
@@ -108,24 +109,84 @@ if __name__ == "__main__":
     # load datasets
     print(f'Loading datasets...')
     train_ds = load_from_disk('data/banking77/processed_v1/train')
+    train_ds = train_ds.select(range(100))
     test_ds = load_from_disk('data/banking77/processed_v1/test')
+    test_ds = test_ds.select(range(50))
     print(f'Datasets loaded.')
 
     print(f'Tokenizing datasets...')
     train_tok = train_ds.map(lambda x: tokenize_masked(x, tokenizer), remove_columns=train_ds.column_names)
     test_tok = test_ds.map(lambda x: tokenize_masked(x, tokenizer), remove_columns=test_ds.column_names)
 
-    train_loader = DataLoader(train_tok, batch_size=4, shuffle=True, collate_fn=make_collate_fn(tokenizer))
-    test_loader = DataLoader(test_tok, batch_size=4, shuffle=True, collate_fn=make_collate_fn(tokenizer))
+    train_loader = DataLoader(train_tok, batch_size=1, shuffle=True, collate_fn=make_collate_fn(tokenizer))
+    test_loader = DataLoader(test_tok, batch_size=1, shuffle=False, collate_fn=make_collate_fn(tokenizer))
 
     device = torch.device('cuda')
     lora_model.to(device)
 
-    optimizer = AdamW(lora_model.parameters(), lr=1e-4)
+    optimizer = AdamW((p for p in lora_model.parameters() if p.requires_grad), lr=1e-4)
+    grad_accum = 8
+    scaler = GradScaler()
+    num_epochs = 2
 
-    
+    lora_model.config.use_cache = False
+    optimizer.zero_grad(set_to_none=True)
 
-    
+    for epoch in range(num_epochs):
+        total_loss = 0.0
+        eval_loss = 0.0
+        training_steps = 0
+        testing_steps = 0
+        lora_model.train()
+
+        #   Training
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        for step, batch in enumerate(pbar):
+            batch = {k: v.to(device) for k, v in batch.items()}
+
+            with autocast(device_type="cuda", dtype=torch.float16):
+                loss = lora_model(**batch).loss / grad_accum
+
+            scaler.scale(loss).backward()
+
+            if (step + 1) % grad_accum == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+            total_loss += loss.item() * grad_accum
+            training_steps += 1
+            
+
+        if (step + 1) % grad_accum != 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+
+
+        #   Evaluation 
+        lora_model.eval()
+        with torch.inference_mode():  
+            pbar = tqdm(test_loader, desc=f"Eval Epoch {epoch+1}/{num_epochs}")
+            for step, batch in enumerate(pbar):
+                batch = {k: v.to(device) for k, v in batch.items()}
+
+                with autocast(device_type="cuda", dtype=torch.float16):
+                    loss = lora_model(**batch).loss
+
+                eval_loss += loss.item()
+                testing_steps += 1
+                pbar.set_postfix(loss=eval_loss / testing_steps)
+                
+        print(f"Epoch {epoch+1} avg train loss: {total_loss/training_steps:.4f}")
+        print(f"Epoch {epoch+1} avg test loss: {eval_loss/testing_steps:.4f}")
+
+    lora_model.save_pretrained(args.output_dir)
+    tokenizer.save_pretrained(args.output_dir)
+    print("Saved adapter to:", args.output_dir)
+
+
     
 
 
