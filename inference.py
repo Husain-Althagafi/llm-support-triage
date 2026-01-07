@@ -8,6 +8,7 @@ import os
 from typing import List, Dict, Any, Optional
 from datasets import load_from_disk
 from tqdm import tqdm
+from peft import PeftModel
 
 SYSTEM_MSG = (
     f'You are a support triage assistant\n'
@@ -78,11 +79,13 @@ if __name__ == '__main__':
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # TODO: load LoRa weights if specified
     if args.use_lora:
-        pass
+        print(f'Loading LoRa weights from outputs/weights/lora_triage_model...')
+        model = PeftModel.from_pretrained(model, 'outputs/weights/lora_triage_model')
+        print(f'LoRa weights loaded.')
 
     test_ds = load_from_disk('data/banking77/processed_v1/test')
+    # test_ds = test_ds.shuffle(seed=19).select(range(50))
 
     test_ds = test_ds.map(
         lambda sample: {
@@ -98,23 +101,26 @@ if __name__ == '__main__':
     valid = 0
     batch_size = 8
 
-    for i in tqdm(range(0, len(test_ds), batch_size), desc=f'Batch inference'):
-        batch = test_ds[i:i+batch_size]
-        prompts = batch['full_prompt']
-        responses = generate_batch(model, tokenizer, prompts)
+    model.to('cuda')
 
-        for j in range(len(responses)):
-            total += 1
-            resp_json = try_parse_json(responses[j])
-            if resp_json is not None:
-                print(f'GT Category: {batch["gt_cat"][j]}, GT Priority: {batch["gt_prio"][j]}')
-                print(f'Predicted Response JSON: {resp_json["category"]}, {resp_json["priority"]}')
-                pred_cat = resp_json.get('category', None)
-                pred_prio = resp_json.get('priority', None)
+    model.eval()
+    with torch.inference_mode():
+        pbar = tqdm(range(0, len(test_ds), batch_size), desc=f'Batch inference')
+        for i in pbar:
+            batch = test_ds.select(range(i, min(i+batch_size, len(test_ds))))
+            prompts = batch['full_prompt']
+            responses = generate_batch(model, tokenizer, prompts)
 
-                if pred_cat == batch['gt_cat'][j] and pred_prio == batch['gt_prio'][j]:
-                    valid += 1
-    print(f'Accuracy: {valid}/{total} = {valid/total:.4f}')
+            for j in range(len(responses)):
+                total += 1
+                resp_json = try_parse_json(responses[j])
+                if resp_json is not None:
+                    pred_cat = resp_json.get('category', None)
+                    pred_prio = resp_json.get('priority', None)
+
+                    if pred_cat == batch['gt_cat'][j] and pred_prio == batch['gt_prio'][j]:
+                        valid += 1
+        print(f'Accuracy: {valid}/{total} = {valid/total:.4f}')
 
 
     

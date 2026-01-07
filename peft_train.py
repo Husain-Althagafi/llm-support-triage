@@ -163,8 +163,6 @@ if __name__ == "__main__":
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
-
-
         #   Evaluation 
         lora_model.eval()
         with torch.inference_mode():  
@@ -178,7 +176,7 @@ if __name__ == "__main__":
                 eval_loss += loss.item()
                 testing_steps += 1
                 pbar.set_postfix(loss=eval_loss / testing_steps)
-                
+
         print(f"Epoch {epoch+1} avg train loss: {total_loss/training_steps:.4f}")
         print(f"Epoch {epoch+1} avg test loss: {eval_loss/testing_steps:.4f}")
 
