@@ -9,7 +9,7 @@ from model import get_model, get_lora_config, get_lora_model
 import json
 from typing import List, Dict, Any, Optional
 from tqdm import tqdm
-import torch.optim.AdamW as AdamW
+from torch.optim import AdamW
 
 
 def tokenize_masked(sample: Dict, tokenizer: AutoTokenizer, max_length: int = 512) -> Dict:
@@ -111,14 +111,21 @@ if __name__ == "__main__":
     test_ds = load_from_disk('data/banking77/processed_v1/test')
     print(f'Datasets loaded.')
 
+    print(f'Tokenizing datasets...')
     train_tok = train_ds.map(lambda x: tokenize_masked(x, tokenizer), remove_columns=train_ds.column_names)
-    test_tok = test_ds.map(lambda x: tokenize_masked(x), tokenizer, remove_columns=test_ds.column_names)
+    test_tok = test_ds.map(lambda x: tokenize_masked(x, tokenizer), remove_columns=test_ds.column_names)
 
-    train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, collate_fn=make_collate_fn(tokenizer))
-    test_loader = DataLoader(test_ds, batch_size=4, shuffle=True, collate_fn=make_collate_fn(tokenizer))
+    train_loader = DataLoader(train_tok, batch_size=4, shuffle=True, collate_fn=make_collate_fn(tokenizer))
+    test_loader = DataLoader(test_tok, batch_size=4, shuffle=True, collate_fn=make_collate_fn(tokenizer))
+
+    device = torch.device('cuda')
+    lora_model.to(device)
+
+    optimizer = AdamW(lora_model.parameters(), lr=1e-4)
 
     
 
+    
     
 
 
